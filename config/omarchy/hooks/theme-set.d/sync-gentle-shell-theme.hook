@@ -1,0 +1,70 @@
+#!/bin/bash
+
+# omarchy hook: sync the generated Omarchy Pi theme into Gentle Shell.
+#
+# Omarchy renders the active theme into ~/.local/state/omarchy/current/theme/pi.json
+# and its own omarchy-theme-set-pi copies it into ~/.pi/agent (hardcoded). This
+# hook mirrors that same generated file into Gentle Shell's agent home so the
+# two surfaces stay in lockstep no matter which Omarchy theme is active.
+#
+# The active theme name is passed as $1 (snake-cased). It is intentionally
+# unused: every Omarchy theme renders to the same "omarchy-system" pi theme, so
+# Gentle Shell always follows the current palette without a name mapping.
+#
+# Pi hot-reloads the active custom theme from <agentDir>/themes/<name>.json, so
+# once Gentle Shell's settings.json declares "theme": "omarchy-system", future
+# theme changes apply live with no /reload.
+
+set -euo pipefail
+
+SOURCE="${HOME}/.local/state/omarchy/current/theme/pi.json"
+
+# Resolve Gentle Shell's agent home the same way gentle-shell.mjs does: an
+# explicit env override wins, then the default isolated home. Never write into
+# pi's own ~/.pi/agent here — omarchy-theme-set-pi already handles that.
+GENTLE_AGENT_DIR="${PI_CODING_AGENT_DIR:-${GENTLE_PI_AGENT_HOME:-${HOME}/.gentle-shell/agent}}"
+
+GENTLE_THEME_DIR="${GENTLE_AGENT_DIR}/themes"
+GENTLE_THEME_PATH="${GENTLE_THEME_DIR}/omarchy-system.json"
+GENTLE_SETTINGS_PATH="${GENTLE_AGENT_DIR}/settings.json"
+
+THEME_NAME="omarchy-system"
+
+# post_theme_commands (including omarchy-theme-set-pi) run in parallel before
+# this hook, so pi.json is normally already there. Retry briefly for safety in
+# case a concurrent writer is still flushing it.
+for _ in $(seq 1 30); do
+  if [[ -f "${SOURCE}" ]]; then
+    break
+  fi
+  sleep 0.1
+done
+
+if [[ ! -f "${SOURCE}" ]]; then
+  echo "sync-gentle-shell-theme: theme source missing: ${SOURCE}" >&2
+  exit 0
+fi
+
+mkdir -p "${GENTLE_THEME_DIR}"
+
+# Atomic replace so pi's theme watcher never reads a half-written file.
+tmp=$(mktemp "${GENTLE_THEME_PATH}.XXXXXX")
+cp "${SOURCE}" "${tmp}"
+mv "${tmp}" "${GENTLE_THEME_PATH}"
+
+# Point Gentle Shell at the synced theme, preserving every other setting field.
+mkdir -p "${GENTLE_AGENT_DIR}"
+
+if [[ -f "${GENTLE_SETTINGS_PATH}" ]]; then
+  tmp_settings=$(mktemp "${GENTLE_SETTINGS_PATH}.XXXXXX")
+  jq --arg theme "${THEME_NAME}" '.theme = $theme' "${GENTLE_SETTINGS_PATH}" >"${tmp_settings}"
+  mv "${tmp_settings}" "${GENTLE_SETTINGS_PATH}"
+else
+  cat >"${GENTLE_SETTINGS_PATH}" <<EOF
+{
+  "theme": "${THEME_NAME}"
+}
+EOF
+fi
+
+echo "sync-gentle-shell-theme: synced Omarchy theme '${THEME_NAME}' into ${GENTLE_AGENT_DIR}"
